@@ -59,9 +59,11 @@ void init() {
   pinMode(PIN_LED_LOAD, OUTPUT);
   pinMode(PIN_LED_WIFI, OUTPUT);
   pinMode(PIN_LED_FAULT, OUTPUT);
+  pinMode(PIN_LED_MODE, OUTPUT);
   digitalWrite(PIN_LED_LOAD, LOW);
   digitalWrite(PIN_LED_WIFI, LOW);
   digitalWrite(PIN_LED_FAULT, LOW);
+  digitalWrite(PIN_LED_MODE, LOW);
 
   pinMode(PIN_BTN, INPUT_PULLUP);
   pinMode(PIN_MODE_A, INPUT_PULLUP);
@@ -106,6 +108,7 @@ void setLed(Led led, bool on) {
     case Led::Load:  pin = PIN_LED_LOAD;  break;
     case Led::WiFi:  pin = PIN_LED_WIFI;  break;
     case Led::Fault: pin = PIN_LED_FAULT; break;
+    case Led::Mode:  pin = PIN_LED_MODE;  break;
   }
   digitalWrite(pin, on ? HIGH : LOW);
 }
@@ -140,14 +143,17 @@ ButtonEvent pollButton(uint32_t nowMs) {
   if ((uint32_t)(nowMs - g_btnLastChange) >= DEBOUNCE_MS && raw != g_btnStable) {
     g_btnStable = raw;
     if (g_btnStable) {
-      // Clean press detected.
-      ev.pressedEdge = true;
+      // Press down: start timing. The action is decided on release / long-hold,
+      // so a long press does NOT also fire a short press.
       g_btnPressStart = nowMs;
       g_btnLongFired = false;
+    } else if (!g_btnLongFired) {
+      // Released before the long threshold -> it was a short press.
+      ev.shortPress = true;
     }
   }
 
-  // Long-press detection while the debounced state is held pressed.
+  // Long-press fires once while the button is still held past the threshold.
   if (g_btnStable && !g_btnLongFired &&
       (uint32_t)(nowMs - g_btnPressStart) >= FAULT_ACK_LONGPRESS_MS) {
     ev.longPress = true;

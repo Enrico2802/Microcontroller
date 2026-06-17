@@ -3,10 +3,11 @@
 // =============================================================================
 // control.h - the brain: mode/fault state machine
 //
-// Pure decision logic. Consumes already-sampled inputs (mode bits, button
-// events, surplus W + validity, temperature + status, now) and emits a Decision
-// (desired load, active mode, fault mask). It performs NO direct GPIO/ADC
-// access; main applies the Decision through the single hal::setLoad() choke-point.
+// Pure decision logic. The selected mode lives in State and changes only via
+// cycleMode()/setMode(); evaluate() consumes sampled inputs (surplus, temperature,
+// sample ages, fault-ack) and emits a Decision (desired load, active mode, fault
+// mask). It performs NO direct GPIO/ADC access; main applies the Decision through
+// the single hal::setLoad() choke-point.
 //
 // Strict descending priority: FAULT > OFF > MANUAL > AUTO.
 // =============================================================================
@@ -27,23 +28,20 @@ enum Fault : uint16_t {
   FAULT_NTC_SHORT        = 1u << 2,  // NTC short circuit (Rntc -> 0)
   FAULT_NTC_RANGE        = 1u << 3,  // NTC reading out of valid temperature range
   FAULT_OVERTEMP         = 1u << 4,  // temperature over limit
-  FAULT_MODE_SELECTOR    = 1u << 5,  // inconsistent mode selector (A=0,B=0)
+  FAULT_MODE_SELECTOR    = 1u << 5,  // reserved (legacy hardware selector; unused with cycle-button UI)
   FAULT_SENSOR_STALE     = 1u << 6,  // a sensor sample path stopped updating (heartbeat lost)
   FAULT_INTERNAL         = 1u << 7,  // self-consistency / invariant violation
 };
 
 // Inputs gathered by main once per control tick.
 struct Inputs {
-  bool                aClosed;       // mode input A closed (active-low pressed)
-  bool                bClosed;       // mode input B closed
-  bool                buttonPressed; // debounced press edge this tick
-  bool                buttonLong;    // long-press (fault acknowledge) this tick
+  bool                buttonLong;    // fault-acknowledge request this tick (long-press / HA reset)
   uint32_t            surplusW;      // filtered PV surplus in watts
   bool                surplusValid;  // PV reading within plausible window
   float               tempC;         // filtered NTC temperature
   temperature::Status tempStatus;    // NTC health classification
-  uint32_t            pvSampleAgeMs;   // age of the last PV sample (now - hal::surplusLastSampleMs)
-  uint32_t            tempSampleAgeMs; // age of the last NTC sample (now - temperature::lastSampleMs)
+  uint32_t            pvSampleAgeMs;   // age of the last PV sample
+  uint32_t            tempSampleAgeMs; // age of the last NTC sample
 };
 
 // Output produced by evaluate(); main applies desiredLoad via hal::setLoad().
@@ -75,6 +73,15 @@ void init(State& s, uint32_t nowMs);
 
 // Master tick: applies fault detection + latch + recovery, then strict priority.
 Decision evaluate(State& s, const Inputs& in, uint32_t nowMs);
+
+// --- Mode + manual control (set by main from the local button AND remote) ----
+// cycleMode advances OFF -> AUTO -> MANUAL -> OFF (local short-press). setMode
+// sets an explicit mode (remote command). Both reset the manual latch and AUTO
+// timers on entry. toggleManual flips the MANUAL load latch (local long-press);
+// setManualOn sets it (remote switch). FAULT and OFF always win in evaluate().
+void cycleMode(State& s);
+void setMode(State& s, Mode m);
+void toggleManual(State& s);
 
 // --- Runtime-adjustable AUTO thresholds (e.g. from Home Assistant) -----------
 // Seeded from config defaults. setThresholds is validated and IGNORED unless

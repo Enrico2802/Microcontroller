@@ -34,9 +34,9 @@
 // PIN MAP (exact, see project spec). Never use GPIO6-11. GPIO34-39 input-only.
 // -----------------------------------------------------------------------------
 constexpr int PIN_LOAD      = 26;  // SSR/contactor driver output (digital out, default LOW/OFF at boot)
-constexpr int PIN_BTN       = 25;  // Manual toggle button (INPUT_PULLUP, active-low)
-constexpr int PIN_MODE_A    = 32;  // Mode input A (INPUT_PULLUP, active-low)
-constexpr int PIN_MODE_B    = 33;  // Mode input B (INPUT_PULLUP, active-low)
+constexpr int PIN_BTN       = 25;  // Mode/multifunction button: short=cycle mode, long=manual toggle / fault ack
+constexpr int PIN_MODE_A    = 32;  // Reserved (free GPIO; e.g. a future dedicated manual button)
+constexpr int PIN_MODE_B    = 33;  // Reserved (free GPIO)
 constexpr int PIN_PV        = 34;  // PV surplus analog input (ADC1, input-only, no pull-up)
 constexpr int PIN_NTC       = 35;  // NTC temperature analog input (ADC1, input-only, no pull-up)
 constexpr int PIN_OLED_SDA  = 21;  // OLED SDA (only used if ENABLE_OLED)
@@ -44,6 +44,7 @@ constexpr int PIN_OLED_SCL  = 22;  // OLED SCL (only used if ENABLE_OLED)
 constexpr int PIN_LED_LOAD  = 16;  // Load status LED (digital out)
 constexpr int PIN_LED_WIFI  = 17;  // WiFi status LED (digital out)
 constexpr int PIN_LED_FAULT = 18;  // Fault status LED (digital out)
+constexpr int PIN_LED_MODE  = 27;  // Mode LED: off=OFF, blink=AUTO, solid=MANUAL (digital out)
 
 // -----------------------------------------------------------------------------
 // CONTROL TUNABLES (AUTO mode hysteresis / delays / dwell, overtemp limit)
@@ -128,21 +129,24 @@ constexpr uint32_t PV_STALE_MS = SAMPLE_INTERVAL_MS * 10;  // 500 ms
 constexpr uint32_t WATCHDOG_TIMEOUT_S = 5;
 
 // -----------------------------------------------------------------------------
-// SOURCES: where the active mode and the PV surplus value come from.
-// With WiFi enabled the controller is HA-driven: mode + thresholds come from
-// Home Assistant (MQTT), and the surplus is the HA feed-in sensor over MQTT.
-// With WiFi disabled it reverts to the local selector + local ADC (pure standalone).
-// SAFETY: regardless of source, FAULT and a forced OFF always win in control.cpp,
-// and a lost link (remote source) collapses the effective mode to OFF (below).
+// PV SURPLUS SOURCE. With WiFi enabled the surplus comes from Home Assistant
+// (MQTT). With WiFi disabled it is the local ADC on GPIO34 (pure standalone).
+// The MODE is NOT compile-time bound to a source: the local button AND Home
+// Assistant can both set it at runtime (last change wins) -- see main.cpp.
+// SAFETY: regardless of source, FAULT and a forced OFF always win in control.cpp.
 // -----------------------------------------------------------------------------
 #if ENABLE_WIFI
 #define SURPLUS_SOURCE_MQTT 1   // surplus value arrives from HA over MQTT
-#ifndef MODE_SOURCE_REMOTE
-#define MODE_SOURCE_REMOTE  1   // mode/thresholds driven by HA (set 0 to use the physical selector)
-#endif
 #else
 #define SURPLUS_SOURCE_MQTT 0   // surplus value read from the local ADC (GPIO34)
-#define MODE_SOURCE_REMOTE  0   // mode read from the local selector (GPIO32/33)
+#endif
+
+// Optional: when the MQTT surplus feed goes stale, fall back to the local ADC
+// (GPIO34) instead of faulting to OFF. Default OFF -- only enable once a real
+// local surplus sensor (or test poti) is wired to GPIO34, otherwise a floating
+// pin would feed garbage to AUTO. (Issues.txt #5.)
+#ifndef ENABLE_LOCAL_SURPLUS_FALLBACK
+#define ENABLE_LOCAL_SURPLUS_FALLBACK 0
 #endif
 
 // -----------------------------------------------------------------------------
@@ -158,11 +162,6 @@ constexpr uint32_t MQTT_RECONNECT_MS     = 5000;   // broker reconnect attempt c
 constexpr uint16_t MQTT_KEEPALIVE_S      = 15;     // MQTT keepalive (broker marks us dead at ~1.5x)
 constexpr uint32_t MQTT_STATE_PUBLISH_MS = 5000;   // telemetry publish cadence
 constexpr uint16_t MQTT_BUFFER_BYTES     = 1024;   // must fit the largest discovery payload
-
-// Remote-source safety: if the broker link is down longer than this, the
-// effective mode collapses to OFF (the controller cannot trust a stale remote
-// command). Auto-restores to the last commanded mode on reconnect.
-constexpr uint32_t LINK_LOSS_SAFE_MS = 60000;      // 60 s
 
 // Plausibility window for the received feed-in power (W). The sensor is signed:
 // positive = PV export/surplus, negative = grid import. Values outside this band

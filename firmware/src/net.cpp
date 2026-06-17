@@ -57,12 +57,17 @@ bool     g_surplusNumeric = false;  // last payload parsed to a plausible number
 bool     g_surplusGotOne  = false;  // at least one valid value ever received
 uint32_t g_surplusLastMs  = 0;      // millis() of the last valid value
 
-// --- Remote requests (levels) ------------------------------------------------
+// --- Remote requests ---------------------------------------------------------
+// Mode/manual are consume-once events (pending flags) so they do not override a
+// local change every tick. Thresholds are levels (no local equivalent to fight).
 control::Mode g_remoteMode  = control::Mode::OFF;
+bool          g_modeCmdPending = false;
 bool          g_remoteManual = false;
+bool          g_manualCmdPending = false;
 uint32_t      g_remoteOnW   = SURPLUS_ON_THRESHOLD_W;
 uint32_t      g_remoteOffW  = SURPLUS_OFF_THRESHOLD_W;
 bool          g_faultResetPending = false;
+bool          g_cmdDirty    = false;  // any inbound command -> trigger an immediate state echo
 
 // --- Small helpers -----------------------------------------------------------
 const char* modeName(control::Mode m) {
@@ -143,19 +148,25 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
       g_surplusNumeric = false;
     }
   } else if (strcmp(topic, g_tMode) == 0) {
+    bool ok = true;
     if      (strcasecmp(buf, "OFF") == 0)    g_remoteMode = control::Mode::OFF;
     else if (strcasecmp(buf, "MANUAL") == 0) g_remoteMode = control::Mode::MANUAL;
     else if (strcasecmp(buf, "AUTO") == 0)   g_remoteMode = control::Mode::AUTO;
+    else                                     ok = false;
+    if (ok) { g_modeCmdPending = true; g_cmdDirty = true; }
   } else if (strcmp(topic, g_tManual) == 0) {
     g_remoteManual = truthy(buf);
+    g_manualCmdPending = true;
+    g_cmdDirty = true;
   } else if (strcmp(topic, g_tThOn) == 0) {
     uint32_t w;
-    if (parseWatts(buf, w)) g_remoteOnW = w;
+    if (parseWatts(buf, w)) { g_remoteOnW = w; g_cmdDirty = true; }
   } else if (strcmp(topic, g_tThOff) == 0) {
     uint32_t w;
-    if (parseWatts(buf, w)) g_remoteOffW = w;
+    if (parseWatts(buf, w)) { g_remoteOffW = w; g_cmdDirty = true; }
   } else if (strcmp(topic, g_tFaultReset) == 0) {
     g_faultResetPending = true;
+    g_cmdDirty = true;
   }
 }
 
@@ -227,7 +238,7 @@ void publishDiscovery() {
   // select: mode (OFF/MANUAL/AUTO)
   snprintf(cfg, sizeof cfg,
     "{\"name\":\"Mode\",\"uniq_id\":\"%s_mode\",\"stat_t\":\"%s\","
-    "\"val_tpl\":\"{{ value_json.mode }}\",\"cmd_t\":\"%s\","
+    "\"val_tpl\":\"{{ value_json.mode }}\",\"cmd_t\":\"%s\",\"ret\":true,"
     "\"options\":[\"OFF\",\"MANUAL\",\"AUTO\"],%s}",
     g_nodeId, g_state, g_tMode, dev);
   publishConfig("select", "mode", cfg);
@@ -235,7 +246,7 @@ void publishDiscovery() {
   // switch: manual load request (effective only in MANUAL)
   snprintf(cfg, sizeof cfg,
     "{\"name\":\"Manual Load\",\"uniq_id\":\"%s_manual\",\"stat_t\":\"%s\","
-    "\"val_tpl\":\"{{ value_json.manual }}\",\"cmd_t\":\"%s\","
+    "\"val_tpl\":\"{{ value_json.manual }}\",\"cmd_t\":\"%s\",\"ret\":true,"
     "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",%s}",
     g_nodeId, g_state, g_tManual, dev);
   publishConfig("switch", "manual", cfg);
@@ -243,7 +254,7 @@ void publishDiscovery() {
   // number: AUTO ON threshold
   snprintf(cfg, sizeof cfg,
     "{\"name\":\"Threshold ON\",\"uniq_id\":\"%s_th_on\",\"stat_t\":\"%s\","
-    "\"val_tpl\":\"{{ value_json.th_on_w }}\",\"cmd_t\":\"%s\","
+    "\"val_tpl\":\"{{ value_json.th_on_w }}\",\"cmd_t\":\"%s\",\"ret\":true,"
     "\"min\":0,\"max\":20000,\"step\":50,\"unit_of_meas\":\"W\",\"mode\":\"box\","
     "\"ent_cat\":\"config\",%s}", g_nodeId, g_state, g_tThOn, dev);
   publishConfig("number", "th_on", cfg);
@@ -251,7 +262,7 @@ void publishDiscovery() {
   // number: AUTO OFF threshold
   snprintf(cfg, sizeof cfg,
     "{\"name\":\"Threshold OFF\",\"uniq_id\":\"%s_th_off\",\"stat_t\":\"%s\","
-    "\"val_tpl\":\"{{ value_json.th_off_w }}\",\"cmd_t\":\"%s\","
+    "\"val_tpl\":\"{{ value_json.th_off_w }}\",\"cmd_t\":\"%s\",\"ret\":true,"
     "\"min\":0,\"max\":20000,\"step\":50,\"unit_of_meas\":\"W\",\"mode\":\"box\","
     "\"ent_cat\":\"config\",%s}", g_nodeId, g_state, g_tThOff, dev);
   publishConfig("number", "th_off", cfg);
@@ -424,6 +435,26 @@ bool consumeFaultReset() {
     return true;
   }
   return false;
+}
+
+bool takeModeCommand(control::Mode& out) {
+  if (!g_modeCmdPending) return false;
+  g_modeCmdPending = false;
+  out = g_remoteMode;
+  return true;
+}
+
+bool takeManualCommand(bool& out) {
+  if (!g_manualCmdPending) return false;
+  g_manualCmdPending = false;
+  out = g_remoteManual;
+  return true;
+}
+
+bool takeCmdDirty() {
+  if (!g_cmdDirty) return false;
+  g_cmdDirty = false;
+  return true;
 }
 
 void publishState(const control::Decision& d, bool loadOn, long surplusRaw,

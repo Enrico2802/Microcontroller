@@ -23,11 +23,11 @@ struct ModeRaw {
 
 // Result of the non-blocking button debounce state machine, evaluated per tick.
 struct ButtonEvent {
-  bool pressedEdge;  // true exactly once per clean press (falling edge of active-low input)
-  bool longPress;    // true exactly once when a held press crosses FAULT_ACK_LONGPRESS_MS
+  bool shortPress;   // true once on RELEASE of a press shorter than FAULT_ACK_LONGPRESS_MS
+  bool longPress;    // true once when a held press crosses FAULT_ACK_LONGPRESS_MS
 };
 
-enum class Led : uint8_t { Load, WiFi, Fault };
+enum class Led : uint8_t { Load, WiFi, Fault, Mode };
 
 // --- Boot / init -------------------------------------------------------------
 

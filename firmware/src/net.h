@@ -58,6 +58,12 @@ uint32_t      remoteThresholdOnW();   // last commanded AUTO ON threshold (W)
 uint32_t      remoteThresholdOffW();  // last commanded AUTO OFF threshold (W)
 bool          consumeFaultReset();    // true once if a remote fault-reset was requested
 
+// Consume-once inbound HA commands (so they do not override local changes every
+// tick; main applies remote first, then local, so a local button press wins ties).
+bool          takeModeCommand(control::Mode& out);  // true if a new mode command arrived
+bool          takeManualCommand(bool& out);         // true if a new manual command arrived
+bool          takeCmdDirty();                       // true once after ANY inbound command (state echo)
+
 // Publish current controller state (telemetry) to HA. No-op if not connected.
 void publishState(const control::Decision& d, bool loadOn, long surplusRawW,
                   uint32_t surplusUsedW, float tempC,
@@ -79,6 +85,9 @@ inline bool          remoteManual() { return false; }
 inline uint32_t      remoteThresholdOnW() { return SURPLUS_ON_THRESHOLD_W; }
 inline uint32_t      remoteThresholdOffW() { return SURPLUS_OFF_THRESHOLD_W; }
 inline bool          consumeFaultReset() { return false; }
+inline bool          takeModeCommand(control::Mode& /*out*/) { return false; }
+inline bool          takeManualCommand(bool& /*out*/) { return false; }
+inline bool          takeCmdDirty() { return false; }
 inline void publishState(const control::Decision& /*d*/, bool /*loadOn*/,
                          long /*surplusRawW*/, uint32_t /*surplusUsedW*/,
                          float /*tempC*/, temperature::Status /*tempStatus*/,

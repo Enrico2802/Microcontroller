@@ -24,6 +24,111 @@ OLED remains an optional, disabled no-op seam.
 
 ---
 
+## System overview — block, wiring & sequence
+
+### Block & wiring overview
+
+```mermaid
+flowchart LR
+    subgraph LV["Low-voltage DC side - SELV, safe to touch"]
+        PSU["5V USB / supply"] --> ESP["ESP32-32S"]
+        ESP -->|GPIO26| DRV["Driver transistor + 10k pulldown"]
+        DRV --> SIN["SSR input 3-32V DC"]
+        DIV["NTC + 10k divider"] -->|GPIO35 ADC1| ESP
+        BTN["Mode button"] -->|GPIO25| ESP
+        ESP -->|GPIO16 17 18 27| LED["Load / WiFi / Fault / Mode LEDs"]
+    end
+    subgraph ACS["230V AC mains side - DANGER, qualified only"]
+        SOUT["SSR output 24-480V AC"] --> COIL["CT1-25 coil 230V"]
+        COIL --> CONT["CT1-25 contacts 4NO"]
+        CONT --> LOAD["Load - heater or lamp"]
+    end
+    SIN -. opto-isolated .-> SOUT
+    HA["Home Assistant - PV feed-in sensor"] -->|surplus via MQTT| ESP
+    ESP -->|telemetry + discovery| HA
+```
+
+> The **SSR is the galvanic isolation boundary** between the ESP/low-voltage side
+> and the 230 V mains side — the ESP never touches mains.
+> **Current build:** surplus comes from Home Assistant over MQTT. The local mode
+> button (GPIO25) + mode LED (GPIO27) are implemented and work without WiFi (mode:
+> local button and HA, last change wins). GPIO34 (local ADC surplus) is an
+> optional, default-off fallback.
+
+### Power path & driver detail (build-critical)
+
+```text
+  DC control side (SELV, safe)            |   230 V AC mains (isolated by SSR)
+  --------------------------------------- | ----------------------------------------
+  +5V/+12V ───────────────► SSR "+"       |   L ─► SSR output ─► CT1-25 coil ─► N
+  GPIO26 ─[220R]─► G (logic MOSFET)       |        (SSR sits in series with coil)
+                  D ◄─────── SSR "−"      |
+                  S ───────► GND(=supply) |   L1 ─► CT1-25 contact ─► Load ─► N
+  Gate ─[10k]─ GND  (fail-safe pulldown)  |        (contactor switches the load)
+```
+
+- GPIO26 HIGH → MOSFET conducts → SSR input energized → SSR closes → coil → contactor → load ON.
+- Common ground between the ESP and the SSR-input supply is mandatory.
+- NTC divider (see §2): `3V3 — NTC — GPIO35 — 10k — GND`.
+- **Mandatory:** the 10k gate pulldown keeps the SSR OFF during boot/reset/brownout.
+
+### Sequence — AUTO surplus-driven switch-on
+
+```mermaid
+sequenceDiagram
+    participant HA as Home Assistant
+    participant BR as MQTT broker
+    participant NET as ESP net
+    participant CTL as ESP control
+    participant HAL as ESP hal
+    participant SSR as SSR
+    participant K as Contactor
+    HA->>BR: publish pvctrl/surplus_w = 3434
+    BR->>NET: surplus 3434 W
+    NET->>CTL: surplusW=3434, valid, fresh
+    CTL->>CTL: AUTO held above 1200 W for 10 s and dwell ok
+    CTL->>HAL: setLoad ON, reason auto surplus
+    HAL->>SSR: GPIO26 HIGH via driver
+    SSR->>K: switch 230 V coil
+    K->>K: contacts close, load ON
+    NET->>BR: publish state load=ON mode=AUTO
+    BR->>HA: entities update
+```
+
+### Sequence — fault / fail-safe (overtemp, lost or invalid surplus)
+
+```mermaid
+sequenceDiagram
+    participant SRC as Sensor / link
+    participant CTL as ESP control
+    participant HAL as ESP hal
+    participant SSR as SSR
+    participant K as Contactor
+    SRC-->>CTL: temp above 70 C OR surplus invalid/stale
+    CTL->>CTL: detectFaults, latch, FAULT has top priority
+    CTL->>HAL: setLoad OFF, reason fault
+    HAL->>SSR: GPIO26 LOW
+    SSR->>K: coil de-energized
+    K->>K: contacts open, load OFF
+    Note over CTL: stays OFF until healthy; PV/stale auto-clear, others need ack
+```
+
+### Sequence — boot fail-safe
+
+```mermaid
+sequenceDiagram
+    participant PWR as Power-on / reset
+    participant HAL as ESP hal
+    participant MAIN as ESP main
+    PWR->>HAL: initFailSafe() runs FIRST
+    HAL->>HAL: GPIO26 = LOW (load OFF) before any other init
+    MAIN->>MAIN: init modules, seed sensor filters
+    MAIN->>MAIN: arm Task Watchdog (feed each loop)
+    Note over MAIN,HAL: loop stall -> WDT reset -> reboot -> load OFF again
+```
+
+---
+
 ## 1. Build & flash
 
 Install [PlatformIO](https://platformio.org/) (CLI or the VS Code extension),
@@ -64,33 +169,44 @@ pio run -e esp32dev --build-flag "-D ENABLE_WIFI=0"
 | GPIO | Name          | Direction        | Notes |
 |------|---------------|------------------|-------|
 | 26   | `PIN_LOAD`    | Digital OUT      | SSR/contactor **driver** input. Default LOW/OFF at boot. Only pin written by `setLoad()`. **Requires an external pulldown on the driver stage** (see §7). |
-| 25   | `PIN_BTN`     | INPUT_PULLUP     | Manual toggle button, active-low (button to GND). Software debounced, non-blocking. Long-press (>=3 s) acknowledges/overrides latched faults. |
-| 32   | `PIN_MODE_A`  | INPUT_PULLUP     | Mode selector input A, active-low (closed = GND). |
-| 33   | `PIN_MODE_B`  | INPUT_PULLUP     | Mode selector input B, active-low (closed = GND). |
+| 25   | `PIN_BTN`     | INPUT_PULLUP     | Mode/multifunction button, active-low (to GND), debounced. Short press cycles OFF->AUTO->MANUAL; long press (>=3 s) toggles the load in MANUAL, or acknowledges a latched fault. |
+| 32   | `PIN_MODE_A`  | (reserved)       | Free GPIO (e.g. a future dedicated manual button). |
+| 33   | `PIN_MODE_B`  | (reserved)       | Free GPIO. |
 | 34   | `PIN_PV`      | ADC1 IN (in-only)| PV surplus analog 0-3.3 V. **No internal pull-up** (input-only pin). Provide an external bias/source network in hardware. |
 | 35   | `PIN_NTC`     | ADC1 IN (in-only)| NTC divider node. **No internal pull-up.** |
 | 21   | `PIN_OLED_SDA`| I2C SDA          | Only used if `ENABLE_OLED`. |
 | 22   | `PIN_OLED_SCL`| I2C SCL          | Only used if `ENABLE_OLED`. |
 | 16   | `PIN_LED_LOAD`| Digital OUT      | Load status LED (on = load energized). |
-| 17   | `PIN_LED_WIFI`| Digital OUT      | WiFi status LED (off in the standalone build). |
+| 17   | `PIN_LED_WIFI`| Digital OUT      | WiFi/HA LED: solid = MQTT connected, blink = WiFi only, off = no network. |
 | 18   | `PIN_LED_FAULT`| Digital OUT     | Fault LED. **Blinks ~1 Hz while any fault is latched** (signals "needs operator clear"). |
+| 27   | `PIN_LED_MODE` | Digital OUT     | Mode LED: off = OFF, ~1 Hz blink = AUTO, solid = MANUAL. |
 
 **Pin-safety rules honored:** never GPIO6-11 (SPI flash); GPIO34/35 are
 input-only and have no internal pull-up; both analog channels are on **ADC1**
 (ADC2 is unusable when WiFi is later enabled). All ESP32 logic is 3.3 V only —
 do not feed 5 V into any pin.
 
-### Mode selector (2 inputs -> 3 modes)
+### Local control: mode button (GPIO25) + mode LED (GPIO27)
 
-A 3-position selector with the common pole tied to GND, active-low with the
-internal pull-ups:
+A single momentary push-button on GPIO25 (to GND) drives the local UI; one mode
+LED on GPIO27 shows the selected mode:
 
-| A (32) | B (33) | Decoded mode | Notes |
-|--------|--------|--------------|-------|
-| open (1) | open (1) | **OFF** | Also the reading of a disconnected/unwired selector -> safe default. |
-| closed (0) | open (1) | **MANUAL** | Load follows the local button toggle. |
-| open (1) | closed (0) | **AUTO** | Load follows the PV surplus hysteresis. |
-| closed (0) | closed (0) | **INVALID** | Electrically impossible for a healthy selector -> raises `FAULT_MODE_SELECTOR`; load stays OFF. |
+| Button action | Effect |
+|---------------|--------|
+| **Short press** | Cycle the mode: OFF -> AUTO -> MANUAL -> OFF. |
+| **Long press (>=3 s) in MANUAL** | Toggle the load ON/OFF. |
+| **Long press (>=3 s) while faulted** | Acknowledge / clear the latched fault. |
+
+| Mode LED (GPIO27) | Meaning |
+|-------------------|---------|
+| off | OFF mode |
+| ~1 Hz blink | AUTO mode |
+| solid on | MANUAL mode |
+
+The local button works **independently of WiFi**. Home Assistant can also set the
+mode (its `Mode` select); the **last change wins** (local or remote). A local OFF
+and any FAULT always force the load off and override any remote command.
+(`PIN_MODE_A`/`PIN_MODE_B` are now free; the old 2-bit selector decode is gone.)
 
 ### NTC divider
 
@@ -111,8 +227,8 @@ temperature rises (Rntc falls). HIGH node = hot, LOW node = cold/open.
 Strict descending priority, re-evaluated every control tick:
 
 1. **FAULT** — any fault latched -> load OFF (cannot be overridden).
-2. **OFF** — selector OFF (or unwired) -> load OFF.
-3. **MANUAL** — load follows the debounced button toggle.
+2. **OFF** — mode OFF -> load OFF.
+3. **MANUAL** — load follows the manual latch (local long-press or HA switch).
 4. **AUTO** — PV surplus hysteresis with on/off delays and minimum dwell.
 
 Fault detection runs **before** mode handling, so a fault arising mid-MANUAL or
@@ -174,9 +290,8 @@ mid-AUTO de-energizes the load within one tick.
 | `TEMP_STALE_MS` | 500 | ms | Max NTC sample age before its heartbeat is lost (-> `FAULT_SENSOR_STALE`). |
 | `PV_STALE_MS` | 90000 / 500 | ms | Max PV value age before stale. 90 s with WiFi (slow network feed); 500 ms for the local ADC build. |
 | `WATCHDOG_TIMEOUT_S` | 5 | s | Task Watchdog timeout; a loop stall past this resets the chip -> load OFF. |
-| `MODE_SOURCE_REMOTE` | 1 / 0 | — | 1 (WiFi build): mode/thresholds from HA. 0: local selector. |
-| `SURPLUS_SOURCE_MQTT` | 1 / 0 | — | 1 (WiFi build): surplus from HA over MQTT. 0: local ADC (GPIO34). |
-| `LINK_LOSS_SAFE_MS` | 60000 | ms | Broker link down longer than this -> effective mode collapses to OFF. |
+| `SURPLUS_SOURCE_MQTT` | 1 / 0 | — | 1 (WiFi build): surplus from HA over MQTT. 0: local ADC (GPIO34). Mode is always runtime button + HA, not a compile flag. |
+| `ENABLE_LOCAL_SURPLUS_FALLBACK` | 0 | — | If 1: when the MQTT surplus goes stale, AUTO falls back to the local ADC (GPIO34) instead of faulting. Needs a real sensor on GPIO34. |
 | `MQTT_STATE_PUBLISH_MS` | 5000 | ms | Telemetry publish cadence to HA. |
 | `SURPLUS_PLAUSIBLE_MIN_W` / `_MAX_W` | -100000 / 100000 | W | Plausibility window for the received feed-in power. |
 
@@ -198,9 +313,9 @@ mid-AUTO de-energizes the load within one tick.
   unattended AUTO from latching off every evening. Otherwise
   `W = mV/ADC_VREF_MV * PV_SURPLUS_FULL_SCALE_W`, clamped to `[0, full-scale]`.
 - **Heartbeat:** each sample path stamps a last-sample timestamp; if the age
-  exceeds `SENSOR_STALE_MS` (sample loop wedged, ADC stuck), control raises
-  `FAULT_SENSOR_STALE` so a frozen-but-plausible reading cannot silently keep the
-  load energized.
+  exceeds `PV_STALE_MS` / `TEMP_STALE_MS` (sample loop wedged, ADC stuck, or the
+  MQTT surplus feed stalled), control raises `FAULT_SENSOR_STALE` so a frozen
+  reading cannot silently keep the load energized.
 - **NTC:** open/short rails are classified **before** any math (no
   divide-by-zero / log-of-negative). A computed temperature outside the valid
   range is `OUT_OF_RANGE`. Overtemp is checked **only** when the NTC reads OK, so
@@ -221,25 +336,26 @@ Each fault forces the load OFF immediately.
 | 0x04 | `FAULT_NTC_SHORT` | NTC node >= `NTC_SHORT_MV` (Rntc -> 0, shorted). | Healthy-hold + ack |
 | 0x08 | `FAULT_NTC_RANGE` | Computed temperature outside `[-50, +90] C`. | Healthy-hold + ack |
 | 0x10 | `FAULT_OVERTEMP` | Healthy NTC reads > `TEMPERATURE_LIMIT_C`. | Healthy-hold + ack |
-| 0x20 | `FAULT_MODE_SELECTOR` | Selector decodes A=0,B=0 (impossible/short). | Healthy-hold + ack |
-| 0x40 | `FAULT_SENSOR_STALE` | A sample path stopped producing fresh readings (age > `SENSOR_STALE_MS`): wedged loop, stuck ADC. | Healthy-hold + ack |
+| 0x20 | `FAULT_MODE_SELECTOR` | Reserved — **not raised** (no hardware selector; mode is button + HA). | n/a |
+| 0x40 | `FAULT_SENSOR_STALE` | A feed stopped producing fresh readings (age > `PV_STALE_MS` / `TEMP_STALE_MS`): wedged loop, stuck ADC, or stalled MQTT surplus. | **Clear-on-recovery** (no ack) |
 | 0x80 | `FAULT_INTERNAL` | Self-consistency / invariant violation (e.g. an impossible mode reaching the AUTO/MANUAL default branch). | **Manual override only** (long-press) |
 
 ### Latching policy (default safe)
 
 Faults **latch** and force the load OFF. Clearing depends on the fault class:
 
-1. **Clear-on-recovery (no ack)** — only `FAULT_PV_INVALID`. The PV surplus is an
-   environmental signal that can momentarily rail; requiring a human after every
-   transient would defeat unattended AUTO. It auto-clears once the reading is
-   plausible again continuously for `FAULT_RECOVERY_HOLD_MS`. It still forces OFF
+1. **Clear-on-recovery (no ack)** — `FAULT_PV_INVALID` and `FAULT_SENSOR_STALE`.
+   The PV surplus is an environmental signal that can momentarily rail, and a
+   (network/MQTT) feed can briefly stop and resume; requiring a human after every
+   transient would defeat unattended AUTO. They auto-clear once the condition is
+   healthy again continuously for `FAULT_RECOVERY_HOLD_MS`. They still force OFF
    while active, and the AUTO ON path re-validates the live surplus before
    energizing, so a transient can never energize the load.
-2. **Healthy-hold + operator acknowledge** — the NTC/overtemp/selector/stale
-   faults. Clears only when **every** self-recoverable latched condition reads
-   healthy continuously for `FAULT_RECOVERY_HOLD_MS` (overtemp uses a 5 C clear
-   margin) **and** an explicit ack is given: move the selector to **OFF**, or
-   **long-press** the manual button (>= `FAULT_ACK_LONGPRESS_MS`).
+2. **Healthy-hold + operator acknowledge** — the NTC/overtemp faults. Clear only
+   when **every** self-recoverable latched condition reads healthy continuously
+   for `FAULT_RECOVERY_HOLD_MS` (overtemp uses a 5 C clear margin) **and** an
+   explicit ack is given: cycle the mode to **OFF**, **long-press** the button
+   (>= `FAULT_ACK_LONGPRESS_MS`), or press HA **Fault Reset**.
 3. **Manual override only** — `FAULT_INTERNAL` has no self-measurable healthy
    reading, so it clears only via a manual **long-press override** (once the
    recoverable faults are also healthy). A reset clears it too.
@@ -299,15 +415,16 @@ disconnected first (dry test).
 
 - [ ] **Boot:** on reset, load LED off, GPIO26 measures LOW *before* the boot
       banner prints; no LED falsely on.
-- [ ] **OFF mode** (A open, B open): load stays OFF in all conditions.
-- [ ] **MANUAL mode** (A closed, B open): each button press toggles the load LED
+- [ ] **Mode cycle:** short presses cycle OFF -> AUTO -> MANUAL -> OFF; the mode
+      LED follows (off / blink / solid) and serial `mode=` updates. The HA `Mode`
+      select changes it too (last change wins).
+- [ ] **OFF mode:** load stays OFF in all conditions.
+- [ ] **MANUAL mode:** a long press (or the HA Manual switch) toggles the load LED
       ON/OFF; serial logs `LOAD ON/OFF (manual ...)`.
 - [ ] **Button debounce:** rapid taps do not produce double toggles.
-- [ ] **AUTO mode** (A open, B closed): feed PV input above 1200 W-equivalent
-      (~ > 1.08 V), confirm load turns ON only after the on-delay **and** the
-      dwell window; drop below 800 W-equivalent, confirm OFF after the off-delay.
-- [ ] **Invalid selector** (A closed, B closed): fault LED blinks; load OFF;
-      serial shows `faults=0x20`.
+- [ ] **AUTO mode:** publish a surplus above 1200 W to `pvctrl/surplus_w` (or use
+      the HA automation); confirm load turns ON only after the on-delay **and** the
+      dwell window; drop below 800 W, confirm OFF after the off-delay.
 - [ ] **NTC open:** unplug the NTC -> fault LED blinks, `faults=0x02`, load OFF.
 - [ ] **NTC short:** short the NTC -> `faults=0x04`, load OFF.
 - [ ] **Overtemp:** warm the NTC above 70 C -> `faults=0x10`, load OFF.
@@ -318,16 +435,16 @@ disconnected first (dry test).
       clears on its own after the recovery hold (no button press needed).
 - [ ] **Sensor stale:** (bench) stall the sample loop / freeze the ADC feed ->
       `faults=0x40`, load OFF.
-- [ ] **Fault clear:** with all conditions healthy, move selector to OFF or
-      long-press the button (>=3 s) -> fault clears after the recovery hold; load
-      remains OFF until a fresh MANUAL/AUTO request. A long-press also clears a
-      latched `FAULT_INTERNAL` (0x80).
-- [ ] **MANUAL is immediate:** in MANUAL, a button press toggles the load with no
-      dwell delay even right after an AUTO->MANUAL switch.
+- [ ] **Fault clear:** with all conditions healthy, cycle the mode to OFF,
+      long-press the button (>=3 s), or press HA "Fault Reset" -> fault clears
+      after the recovery hold; load stays OFF until a fresh MANUAL/AUTO request.
+      A long-press / Fault Reset also clears a latched `FAULT_INTERNAL` (0x80).
+- [ ] **MANUAL is immediate:** in MANUAL, a long-press (or the HA switch) toggles
+      the load with no dwell delay, even right after an AUTO->MANUAL switch.
 - [ ] **Watchdog:** (bench) inject a long busy-loop in `loop()` -> the chip resets
       within ~`WATCHDOG_TIMEOUT_S` and comes back with the load OFF.
-- [ ] **LEDs:** load LED tracks load; fault LED blinks only while faulted; WiFi
-      LED stays off in the standalone build.
+- [ ] **LEDs:** load LED tracks load; fault LED blinks only while faulted; mode
+      LED off/blink/solid = OFF/AUTO/MANUAL; WiFi LED solid when MQTT connected.
 
 ---
 
@@ -342,14 +459,15 @@ disconnected first (dry test).
       `hal::setLoad()`. (Grep check: `grep -rn "PIN_LOAD" src` — only `config.h`,
       `initFailSafe`, `init`, and `setLoad` reference it; only `setLoad` ever
       drives it HIGH.)
-- [ ] Mode decoding matches the table in §2, including INVALID -> fault.
+- [ ] Mode is set by the local button (cycle) AND HA (last change wins) and is
+      never published as INVALID (the selected mode survives a fault).
 - [ ] PV mV->W mapping with rail plausibility fault (0 W is not a fault).
 - [ ] NTC mV->R->T (Beta) with open/short/range detection and overtemp fault.
 - [ ] AUTO hysteresis honors on-delay, off-delay, and minimum dwell; OFF is
       immediate.
 - [ ] Strict priority FAULT > OFF > MANUAL > AUTO holds (fault wins mid-mode).
-- [ ] Faults latch per the §6 policy: PV auto-clears on recovery; NTC/overtemp/
-      selector/stale need healthy-hold + ack; `FAULT_INTERNAL` needs a long-press.
+- [ ] Faults latch per the §6 policy: PV/stale auto-clear on recovery;
+      NTC/overtemp need healthy-hold + ack; `FAULT_INTERNAL` needs a long-press.
 - [ ] MANUAL ON/OFF is immediate (dwell gates AUTO only).
 - [ ] AUTO ON is re-validated against the live surplus at the dwell-release
       instant (no energize on a stale crossing).
