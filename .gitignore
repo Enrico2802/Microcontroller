@@ -1,3 +1,11 @@
 # Ignore source/document exports
 *.txt
 *.pdf
+
+# Local connection secrets (never commit credentials)
+firmware/src/secrets.h
+
+# PlatformIO build output
+firmware/.pio/
+.pio/
+Plan_Esp32.md

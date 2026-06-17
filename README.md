@@ -46,9 +46,49 @@ External home automation is therefore not part of the safety-critical core funct
 - LEDs for power, WiFi status, and load state
 - optional OLED display for mode, surplus value, and switching status
 - driver stage using a transistor, optocoupler, or relay module
-- external relay, SSR, or contactor for the load circuit
+- Ailao `GSR2-1-10DA` single-phase solid-state relay with integrated heat sink for switching the contactor coil
+- Heschen `CT1-25` 4-pole AC contactor for the actual load circuit
 - optional sensor or data interface for PV surplus values
 - optional temperature measurement on the driver stage or load
+
+## Planned Switching Element
+
+For the basic prototype, the ESP32 does not switch the load directly. It controls a low-voltage input stage which drives an SSR. The SSR then switches the AC coil of a larger contactor. The contactor performs the actual load switching.
+
+Planned control chain:
+
+```text
+ESP32 GPIO26
+  -> low-voltage driver stage
+  -> Ailao GSR2-1-10DA SSR input
+  -> SSR output switches 230 V AC contactor coil
+  -> Heschen CT1-25 contactor switches the load
+```
+
+The planned intermediate switching element is an Ailao `GSR2-1-10DA` single-phase solid-state relay with an integrated heat sink.
+
+Relevant product data:
+
+- input/control voltage: 3-32 V DC
+- output/load voltage: 24-480 V AC
+- maximum load current: 10 A
+- switching type: normally open solid-state relay
+- intended use in this project: switching the 230 V AC coil of the contactor
+
+The planned main switching element is a Heschen `CT1-25` household AC contactor.
+
+Relevant product data:
+
+- coil voltage: 220/240 V AC
+- rated contact voltage/current: 220/240 V AC, 25 A
+- contact type: 4NO, 4-pole
+- mounting: 35 mm DIN rail
+- approximate size: 82 x 65 x 35 mm
+- net weight: 202 g
+
+The SSR input can be controlled by the ESP32-side low-voltage circuit, but the ESP32 GPIO should not be assumed to drive the SSR directly without verification. For the prototype, GPIO26 should drive the SSR input through a suitable transistor or driver stage.
+
+The SSR is used only for the contactor coil circuit. The high-power load must be switched by the contactor contacts, not by the SSR. Because the selected contactor has a 220/240 V AC coil, the SSR output side is still a mains-voltage circuit and must be wired accordingly.
 
 ## Operating Modes
 
@@ -81,6 +121,10 @@ Important boundaries:
 - The ESP32 must never switch mains voltage or load current directly.
 - Work on mains voltage and 400 V three-phase systems must only be carried out professionally and with suitable protective measures.
 - The microcontroller only controls a galvanically isolated low-voltage switching path.
+- The SSR is not a mechanical isolator. Its off-state leakage current and heat dissipation must be considered.
+- The SSR switches the 230 V AC contactor coil only, not the final high-power load.
+- The contactor coil circuit and load circuit must be fused, mounted, cooled, and enclosed according to the actual mains-voltage safety requirements.
+- SSR leakage current must not be able to hold the contactor coil energized unintentionally.
 - If the ESP32 supply fails or sensor values become invalid, the load should be switched off.
 - The complete high-power electrical installation is outside the scope of this prototype concept.
 
@@ -120,8 +164,10 @@ The planned verification sequence builds up the system step by step.
 ### 1. Low-Voltage Switching Path
 
 - verify the ESP32 GPIO output at approximately 3.3 V
-- actuate the driver stage and relay/SSR
-- switch a small single-phase AC load
+- actuate the driver stage and the `GSR2-1-10DA` SSR input
+- switch the `CT1-25` contactor coil through the SSR
+- verify that the contactor pulls in and drops out reliably
+- monitor SSR and contactor temperature during repeated switching and steady-state operation
 - verify galvanic isolation between ESP32 and AC side
 
 ### 2. Three-Phase Loads
@@ -143,6 +189,17 @@ The planned verification sequence builds up the system step by step.
 ### 4. Temperature Monitoring
 
 During longer load tests, the temperature of the driver stage and, if applicable, the connected load should be monitored. If a configurable temperature limit is exceeded, the firmware should switch the load off.
+
+The planned sensor for this task is an InLine temperature sensor with a 1 m cable and 2-pin header connector. It is an NTC thermistor with a nominal resistance of 10 kOhm at 25 °C and a specified temperature range of -50 °C to +90 °C.
+
+Because the sensor is a passive NTC resistor, it must be connected to the ESP32 through a voltage divider, not directly as a digital sensor. The divider output can be read by an ADC1 input such as GPIO35. The firmware then converts the ADC voltage into a resistance value and estimates the temperature using the NTC characteristic or a calibration table.
+
+For the prototype, the temperature monitoring should verify:
+
+- correct ADC reading from the NTC voltage divider
+- plausible temperature conversion around room temperature
+- load shutdown when the configured temperature limit is exceeded
+- local and optional Home Assistant fault indication after overtemperature shutdown
 
 ### Optional: Standalone Operation
 
