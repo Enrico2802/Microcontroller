@@ -1,2 +1,164 @@
-# Microcontroller
-ESP32-based PV surplus load controller with local user interface and Home Assistant integration
+# ESP32 PV Surplus Load Controller
+
+This project describes an ESP32-based load controller that can automatically switch high-power consumers depending on the available photovoltaic surplus. The main control logic runs locally on the ESP32, so the controller remains operational even without Home Assistant, Node-RED, or an internet connection.
+
+Home Assistant, Node-RED, and MQTT are intended as optional interfaces for visualization, monitoring, and parameter adjustment. The actual switching decision is made locally on the device.
+
+## Project Goal
+
+Households with a photovoltaic system often have surplus electrical energy available for limited periods of time. This prototype is intended to use that surplus by automatically activating suitable consumers, for example:
+
+- heating elements
+- other large resistive loads
+- miners or comparable high-power consumers
+
+Since these loads cannot be switched directly by a microcontroller, the ESP32 only controls a safe low-voltage switching path. The actual load is switched by an external relay, solid-state relay, or contactor.
+
+## Key Features
+
+- local control logic on the ESP32
+- operating modes `OFF`, `MANUAL`, and `AUTO`
+- physical user interface using buttons, switches, or a rotary encoder
+- local status indication using LEDs and optionally an OLED display
+- switching output for a relay, SSR, or contactor
+- hysteresis and safety delays to prevent rapid toggling
+- optional WiFi integration with Home Assistant, Node-RED, or MQTT
+- manual override directly on the device
+- safe fallback behavior: load off on faults or missing control signal
+
+## System Overview
+
+The ESP32 performs the complete local control loop:
+
+1. Measure or receive a PV surplus value
+2. Evaluate the operating mode and local user input
+3. Decide whether the load should be switched based on thresholds, hysteresis, and safety delays
+4. Drive a relay, SSR, or contactor through a low-voltage driver stage
+5. Indicate the current state locally
+6. Optionally transmit status data via WiFi
+
+External home automation is therefore not part of the safety-critical core function. It can display values, adjust parameters, or log data, but it is not required for basic operation.
+
+## Planned Hardware
+
+- ESP32 development board
+- buttons, selector switch, or rotary encoder for local input
+- LEDs for power, WiFi status, and load state
+- optional OLED display for mode, surplus value, and switching status
+- driver stage using a transistor, optocoupler, or relay module
+- external relay, SSR, or contactor for the load circuit
+- optional sensor or data interface for PV surplus values
+- optional temperature measurement on the driver stage or load
+
+## Operating Modes
+
+| Mode | Behavior |
+| --- | --- |
+| `OFF` | The load remains switched off. This mode has priority over automatic control and external commands. |
+| `MANUAL` | The load can be switched directly through the local user interface. |
+| `AUTO` | The load is switched automatically depending on the available PV surplus. |
+
+In automatic mode, the load should only be activated after the surplus exceeds a switch-on threshold and a safety delay has elapsed. It is deactivated when the surplus falls below a lower switch-off threshold. This hysteresis prevents rapid switching around a single threshold.
+
+## Home Assistant Integration
+
+The integration with Home Assistant or Node-RED is designed as an addition, not as a requirement. Possible functions include:
+
+- displaying operating mode, load state, and surplus value
+- logging switching events
+- adjusting thresholds
+- showing fault states
+- optionally providing a simulated or externally measured surplus value
+
+If WiFi, Home Assistant, Node-RED, or MQTT fails, the local controller should continue to operate as long as the surplus value is available locally.
+
+## Safety Concept
+
+This project is a proof of concept and not a certified product for mains-voltage installations.
+
+Important boundaries:
+
+- The ESP32 must never switch mains voltage or load current directly.
+- Work on mains voltage and 400 V three-phase systems must only be carried out professionally and with suitable protective measures.
+- The microcontroller only controls a galvanically isolated low-voltage switching path.
+- If the ESP32 supply fails or sensor values become invalid, the load should be switched off.
+- The complete high-power electrical installation is outside the scope of this prototype concept.
+
+## Development Stages
+
+### Basic Prototype
+
+The basic prototype focuses on:
+
+- local operation
+- local switching logic
+- safe low-voltage control of an external switching element
+- optional WiFi integration
+- surplus value from an external source or simulated input
+
+### Final Expansion Stage
+
+The planned final version should measure and decide fully independently. For this purpose, three measurement channels are planned, comparable to a three-phase energy meter such as a Shelly Pro 3EM.
+
+For each phase, the controller should acquire:
+
+- voltage
+- current via current transformer
+- active power
+- apparent power
+- reactive power
+- direction of power flow, meaning grid import or grid export
+
+With these measurements, the controller can calculate the PV surplus by itself and no longer depends on a smart meter, inverter API, MQTT, or home automation system.
+
+An optional battery or UPS supply for the low-voltage section is also planned. This allows the ESP32 to keep running during short supply interruptions, indicate fault states, and resume operation in a defined way after mains power returns.
+
+## Verification and Test Plan
+
+The planned verification sequence builds up the system step by step.
+
+### 1. Low-Voltage Switching Path
+
+- verify the ESP32 GPIO output at approximately 3.3 V
+- actuate the driver stage and relay/SSR
+- switch a small single-phase AC load
+- verify galvanic isolation between ESP32 and AC side
+
+### 2. Three-Phase Loads
+
+- actuate a contactor coil through the verified switching path
+- switch a three-phase resistive load
+- perform repeated switching cycles under load
+- verify behavior when the ESP32 supply fails
+
+### 3. Surplus-Driven Automatic Control
+
+- acquire an external or simulated surplus value
+- verify the switch-on threshold
+- verify the switch-off threshold and hysteresis
+- test manual override
+- detect sensor faults and switch the load off safely
+- verify network-independent operation
+
+### 4. Temperature Monitoring
+
+During longer load tests, the temperature of the driver stage and, if applicable, the connected load should be monitored. If a configurable temperature limit is exceeded, the firmware should switch the load off.
+
+### Optional: Standalone Operation
+
+Standalone operation with integrated three-phase measurement is considered an optional expansion if enough time remains. This would include:
+
+- verifying measurement accuracy for each phase
+- detecting the direction of power flow
+- calculating the total three-phase surplus
+- making switching decisions using only internal measurements
+- testing operation without WiFi, Home Assistant, or external interfaces
+- testing battery or UPS operation of the low-voltage section
+
+## Expected Result
+
+The final prototype should demonstrate that an ESP32 can autonomously control a high-power consumer based on available PV surplus. The device should remain locally operable, require external systems only optionally, and switch to a safe state in case of faults.
+
+## Source
+
+This README was derived from the concept document `Microcontroler_Esp32_englisch_final.pdf`.
