@@ -54,8 +54,8 @@ constexpr uint32_t SURPLUS_OFF_THRESHOLD_W = 800;    // Switch OFF below this su
 constexpr uint32_t SWITCH_ON_DELAY_MS      = 10000;  // Surplus must hold > ON threshold this long
 constexpr uint32_t SWITCH_OFF_DELAY_MS     = 5000;   // Surplus must hold < OFF threshold this long
 constexpr uint32_t MINIMUM_DWELL_TIME_MS   = 30000;  // Min time between load ON transitions (anti-cycling)
-constexpr float    TEMPERATURE_LIMIT_C     = 70.0f;  // Overtemperature fault threshold (C)
-constexpr float    OVERTEMP_CLEAR_MARGIN_C = 5.0f;   // Overtemp recovery hysteresis (clears below limit-margin)
+constexpr float    TEMPERATURE_LIMIT_C     = 80.0f;  // Overtemperature fault threshold (C)
+constexpr float    OVERTEMP_CLEAR_MARGIN_C = 20.0f;  // Overtemp recovery hysteresis (clears below limit-margin -> 60 C)
 
 // -----------------------------------------------------------------------------
 // PV SURPLUS SCALING (GPIO34): 0..ADC_VREF_MV maps linearly to 0..full-scale W

@@ -112,8 +112,12 @@ bool allRecoverableHealthy(uint16_t faults, const Inputs& in) {
 // resumed sample feed. Essential for an unattended HA-fed controller so a WiFi or
 // broker hiccup does not require a human to press Fault Reset afterwards. The load
 // stays OFF while they are active regardless.
+// FAULT_OVERTEMP also auto-clears: once the temperature has fallen back below
+// TEMPERATURE_LIMIT_C - OVERTEMP_CLEAR_MARGIN_C (60 C) and held healthy for the
+// recovery hold, the latch releases on its own (faults -> 0x00) with no button.
 bool isAutoClearOnRecovery(uint16_t bit) {
-  return bit == FAULT_PV_INVALID || bit == FAULT_SENSOR_STALE;
+  return bit == FAULT_PV_INVALID || bit == FAULT_SENSOR_STALE ||
+         bit == FAULT_OVERTEMP;
 }
 
 // AUTO hysteresis sub-FSM. Updates pending timers and the committed autoLoadOn
