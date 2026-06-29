@@ -1,0 +1,848 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{setspace}
+\usepackage{csquotes}
+\usepackage{geometry}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{textcomp}
+\usepackage{xurl}
+
+\setlength{\emergencystretch}{3em}
+\urlstyle{same}
+
+\geometry{left=3cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue,
+  citecolor=black,
+  pdftitle={ESP32 PV Surplus Load Controller Documentation},
+  pdfauthor={Enrico Brodtmann}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{ESP32 PV Surplus Load Controller}
+\rhead{\thepage}
+\setlength{\headheight}{14pt}
+\renewcommand{\arraystretch}{1.2}
+\setlist[itemize]{topsep=4pt,itemsep=2pt}
+\setlist[enumerate]{topsep=4pt,itemsep=2pt}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\statusdone}{implemented}
+\newcommand{\statuspartial}{partly implemented}
+\newcommand{\statusfuture}{planned}
+\newcommand{\statusoutofscope}{out of scope}
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+
+    \IfFileExists{hsb-logo_standardvariante.jpg}{%
+        \includegraphics[width=0.45\textwidth]{hsb-logo_standardvariante.jpg}\\[1.5cm]
+    }{%
+        \vspace*{2.2cm}
+    }
+
+    {\Large Hochschule Bremen}\\[0.3cm]
+    {\large Faculty 4 -- Electrical Engineering and Computer Science}\\[2cm]
+
+    {\huge \textbf{ESP32 PV Surplus Load Controller}}\\[0.5cm]
+    {\LARGE Documentation of a Local-First\\[0.3cm]
+    PV Surplus Load Control Prototype\\[0.3cm]
+    with Tactile UI and Home Assistant Integration}\\[2.5cm]
+
+    \vfill
+    \begin{flushleft}
+        \textbf{Name / Student ID:}\\[0.2cm]
+        Enrico Brodtmann (5265217)\\[0.5cm]
+        \textbf{Degree Program:} Media Informatics B.Sc.\\
+        \textbf{Module:} Microcontrollers and Applications\\
+        \textbf{Lecturer:} C. Flores\\
+        \textbf{Task:} Project documentation and prototype verification\\
+        \textbf{Date:} June 29, 2026\\
+        \textbf{Target specification:} \code{Microcontroler_Esp32_englisch_final.pdf}\\
+        \textbf{Firmware:} v1 -- PlatformIO / Arduino ESP32\\
+    \end{flushleft}
+\end{titlepage}
+
+\newpage
+\tableofcontents
+\newpage
+
+\section{Abstract}
+
+This project implements a proof-of-concept controller that uses an ESP32 to switch
+a high-power load when photovoltaic surplus power is available. The ESP32 does not
+switch mains voltage directly. Instead, it drives a low-voltage switching path which
+can energize a solid-state relay and, through that relay, the coil of a contactor.
+The contactor is the component intended to switch the real load.
+
+The important design goal is that the actual control decision is made locally on
+the ESP32. Home Assistant, MQTT and WiFi are used as useful interfaces for
+monitoring, configuration and for providing the current surplus value in the
+default build. They are not allowed to directly energize the output and cannot
+override a local fault or local OFF state.
+
+This documentation follows the exam requirement described in
+\code{b_progress_and_exams.pdf}: the documentation should show how close the
+implemented project came to its own target specification. Therefore, the document
+does not only describe the program, but also compares the current implementation
+against the original concept, explains the most important design decisions, and
+defines verification steps for the prototype.
+
+\newpage
+\section{Project Goal and Scope}
+
+\subsection{Original goal}
+
+The target specification defines an ESP32-based control unit for using temporary
+PV surplus energy. Typical loads are heating elements or other high-power
+resistive consumers. These loads exceed the direct switching capability of a
+microcontroller, so the ESP32 is only responsible for the safe low-voltage control
+signal.
+
+The core requirements from the target specification are:
+
+\begin{itemize}
+  \item receive or measure a value that represents available PV surplus power,
+  \item make the switching decision locally on the ESP32,
+  \item provide a switching output for an external relay, SSR or contactor,
+  \item support the modes \code{OFF}, \code{MANUAL} and \code{AUTO},
+  \item provide a real tactile local user interface,
+  \item indicate status locally with LEDs and optionally a display,
+  \item transmit status information through WiFi to Home Assistant or Node-RED,
+  \item allow manual override at the device.
+\end{itemize}
+
+\subsection{Implemented prototype scope}
+
+The implemented firmware focuses on the basic prototype: local control logic,
+fault handling, a low-voltage switching output, tactile operation, temperature
+monitoring and Home Assistant integration. The final expansion stage from the
+concept document, namely integrated three-phase measurement comparable to an
+energy meter, is intentionally not part of the current firmware. It was removed
+from the practical project scope because it did not fit the concrete installation
+concept: there was not enough suitable space for the controller close to the PV
+generation side, and moving the controller farther away would have required long
+measurement cable runs. Therefore, this feature was not goal-oriented for this
+prototype, even though it remains technically possible in a different mechanical
+and electrical setup.
+
+The current default build receives the surplus value over MQTT from Home
+Assistant. A pure local build is available by compiling with
+\code{-D ENABLE_WIFI=0}; in that case the surplus value is read from the local
+ADC input on GPIO34. There is also an optional compile-time fallback from MQTT to
+the local ADC, but it is disabled by default because a floating ADC input would
+produce unsafe meaningless values.
+
+\newpage
+\section{Result Against the Target Specification}
+
+\begin{longtable}{p{0.30\textwidth}p{0.18\textwidth}p{0.42\textwidth}}
+\toprule
+Requirement & Status & Current implementation\\
+\midrule
+\endhead
+Receive or measure PV surplus & \statuspartial &
+Default build receives a signed feed-in value over MQTT. A local ADC path on
+GPIO34 exists for offline builds or a future wired sensor. Integrated three-phase
+measurement was described in the concept as a possible expansion, but it was not
+implemented or tested because it was not practical for the actual project
+installation.\\
+
+Local switching decision & \statusdone &
+\code{control.cpp} contains the state machine and decides the desired load state
+on the ESP32. Network code only provides inputs and commands.\\
+
+External switching output & \statusdone &
+GPIO26 is the single firmware output for the load driver. It is initialized LOW
+at boot and is only written through \code{hal::setLoad()}.\\
+
+Modes OFF, MANUAL, AUTO & \statusdone &
+The firmware implements all three modes. Priority is
+\code{FAULT > OFF > MANUAL > AUTO}.\\
+
+Tactile local user interface & \statusdone &
+A physical button on GPIO25 is used. Short press cycles modes, long press toggles
+the load in MANUAL or acknowledges faults.\\
+
+Local status indication & \statuspartial &
+Load, WiFi, fault and mode LEDs are implemented. The OLED interface exists as a
+stub and is explicitly optional in firmware v1.\\
+
+WiFi / Home Assistant integration & \statusdone &
+WiFi, MQTT, retained state publishing and Home Assistant MQTT Discovery are
+implemented.\\
+
+Manual override & \statusdone &
+In MANUAL mode, a long local button press or the Home Assistant manual switch can
+request load ON/OFF. Fault and OFF still have higher priority.\\
+
+Network-independent full operation & \statuspartial &
+The local UI remains usable without WiFi. However, the default WiFi build needs a
+fresh MQTT surplus value before any load can be energized, because a missing
+surplus signal is treated as a safety fault. Full network-independent AUTO
+operation would require the local ADC surplus source or a different local
+measurement concept. The integrated three-phase measurement approach from the
+original concept was excluded from this prototype for practical installation
+reasons.\\
+
+Final standalone three-phase measurement & \statusoutofscope &
+The concept is documented, but no voltage/current measurement front end is
+implemented in this project. In the concrete overall system concept, this
+expansion was not
+target-oriented for the prototype because the available installation space close
+to the PV generation side was not sufficient. Placing the controller elsewhere
+would have required long measurement cable runs, which would make the setup more
+complex and less practical. Technically, integrated three-phase measurement would
+still be possible, but it was not the most suitable goal for this project stage
+and was therefore not tested.\\
+\bottomrule
+\end{longtable}
+
+\newpage
+\section{System Overview}
+
+\subsection{Control chain}
+
+The intended physical switching chain is:
+
+\begin{lstlisting}
+ESP32 GPIO26
+  -> low-voltage transistor or MOSFET driver stage
+  -> Ailao GSR2-1-10DA SSR input, 3-32 V DC
+  -> SSR output switches 230 V AC contactor coil
+  -> Heschen CT1-25 contactor switches the actual load
+\end{lstlisting}
+
+This chain is important because it separates the microcontroller from the
+high-power circuit. The ESP32 only creates a 3.3 V logic signal. The actual load
+current must be switched by a correctly rated contactor, not by the ESP32 and not
+by a small GPIO-connected module.
+
+\subsection{Main hardware components}
+
+\begin{tabularx}{\textwidth}{p{0.26\textwidth}X}
+\toprule
+Component & Role in the system\\
+\midrule
+ESP32-32S / ESP32-WROOM-32 board & Main controller, local state machine, WiFi,
+ADC readings and GPIO output.\\
+Ailao GSR2-1-10DA SSR & Intended intermediate switching element. Its DC input is
+controlled by the low-voltage driver stage; its AC output switches the contactor
+coil.\\
+Heschen CT1-25 contactor & Intended final switching element for the load circuit.
+The concept uses the SSR only for the contactor coil, not for the final load.\\
+10 kOhm NTC temperature sensor & Temperature monitoring input on GPIO35 through a
+voltage divider.\\
+Local button and LEDs & Tactile operation and local status feedback.\\
+Optional OLED display & Not implemented in v1, but the firmware contains a
+read-only interface for a later display implementation.\\
+\bottomrule
+\end{tabularx}
+
+\subsection{Pin assignment}
+
+\begin{longtable}{p{0.12\textwidth}p{0.22\textwidth}p{0.56\textwidth}}
+\toprule
+GPIO & Firmware name & Function\\
+\midrule
+\endhead
+26 & \code{PIN_LOAD} & Digital output for the low-voltage SSR/contact driver.
+Default LOW/OFF at boot.\\
+25 & \code{PIN_BTN} & Local active-low multifunction button with internal
+pull-up and software debounce.\\
+32 & \code{PIN_MODE_A} & Reserved free GPIO, kept for possible future UI
+extension.\\
+33 & \code{PIN_MODE_B} & Reserved free GPIO.\\
+34 & \code{PIN_PV} & ADC1 input for local PV surplus measurement in offline or
+fallback builds.\\
+35 & \code{PIN_NTC} & ADC1 input for the NTC voltage divider.\\
+21 & \code{PIN_OLED_SDA} & I2C SDA for optional OLED.\\
+22 & \code{PIN_OLED_SCL} & I2C SCL for optional OLED.\\
+16 & \code{PIN_LED_LOAD} & Load status LED.\\
+17 & \code{PIN_LED_WIFI} & WiFi/MQTT status LED.\\
+18 & \code{PIN_LED_FAULT} & Fault LED.\\
+27 & \code{PIN_LED_MODE} & Mode LED: off = OFF, blinking = AUTO, solid =
+MANUAL.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Reason for the selected pin concept}
+
+GPIO26 was chosen for the switching output because it is a regular output pin and
+not one of the ESP32 flash pins or typical boot strapping pins. GPIO34 and GPIO35
+are used for analog measurements because they are ADC1 input pins. This matters on
+the ESP32 because ADC2 can conflict with WiFi operation. GPIO34 and GPIO35 are
+input-only and have no internal pull-ups, which is acceptable for analog sensor
+inputs but must be considered in the external wiring.
+
+\newpage
+\section{Firmware Architecture}
+
+\subsection{Project structure}
+
+\begin{lstlisting}
+firmware/
+  platformio.ini
+  src/
+    config.h
+    main.cpp
+    hal.h / hal.cpp
+    temperature.h / temperature.cpp
+    control.h / control.cpp
+    net.h / net.cpp
+    oled.h
+    secrets.example.h
+\end{lstlisting}
+
+The firmware is built with PlatformIO for the \code{esp32dev} board and the
+Arduino-ESP32 framework. The default external library is \code{PubSubClient} for
+MQTT.
+
+\subsection{Module responsibilities}
+
+\begin{longtable}{p{0.24\textwidth}p{0.66\textwidth}}
+\toprule
+File or module & Responsibility\\
+\midrule
+\endhead
+\code{config.h} & Central configuration: feature flags, pins, thresholds, ADC
+constants, timing constants, fault policy and network tunables.\\
+\code{main.cpp} & Composition root and non-blocking super-loop. It initializes the
+system, gathers inputs, calls the control state machine and applies the resulting
+load decision.\\
+\code{hal.cpp} & Hardware abstraction layer. It owns direct GPIO and ADC access,
+including the single writer for GPIO26.\\
+\code{temperature.cpp} & Converts the NTC divider voltage into a temperature and
+classifies NTC faults.\\
+\code{control.cpp} & Pure decision logic. Implements modes, faults, latching,
+hysteresis, delays and minimum dwell time.\\
+\code{net.cpp} & WiFi, MQTT, Home Assistant Discovery, surplus input over MQTT and
+remote commands. It never drives the load directly.\\
+\code{oled.h} & Optional read-only display interface. In v1 it compiles to no-op
+functions unless a later OLED implementation is added.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Reason for the modular split}
+
+The split is a safety and verification decision. The code that receives MQTT
+messages is intentionally separated from the code that can write GPIO26. A remote
+command is only an input request. The state machine in \code{control.cpp} decides
+whether the request is allowed, and \code{main.cpp} applies the decision through
+\code{hal::setLoad()}. This makes it much easier to prove that faults, OFF mode
+and boot behavior cannot be bypassed by network code.
+
+\subsection{Main program flow}
+
+The firmware uses a non-blocking super-loop. No steady-state \code{delay()} is
+used. The loop repeatedly performs these tasks:
+
+\begin{enumerate}
+  \item feed the ESP32 task watchdog,
+  \item service WiFi and MQTT,
+  \item update PV and temperature samples,
+  \item poll the local button and store short/long press events,
+  \item every \code{CONTROL_TICK_MS}, process commands and evaluate the control
+  state machine,
+  \item write the desired load state through \code{hal::setLoad()},
+  \item update LEDs and publish telemetry.
+\end{enumerate}
+
+This design is used because the controller must keep reacting to faults, button
+presses and network events. Blocking delays would make the system less
+predictable and could leave the load in an outdated state for too long.
+
+\newpage
+\section{Control Logic}
+
+\subsection{Operating modes}
+
+The firmware supports the three required operating modes:
+
+\begin{itemize}
+  \item \textbf{OFF}: the load is forced OFF.
+  \item \textbf{MANUAL}: the manual latch decides whether the load should be ON
+  or OFF.
+  \item \textbf{AUTO}: the surplus value is compared against thresholds with
+  hysteresis, delays and dwell time.
+\end{itemize}
+
+The selected mode is stored in \code{control::State::mode}. It is changed only by
+explicit events: a local button short press or a Home Assistant mode command. The
+selected mode is not overwritten by faults. This is intentional because Home
+Assistant should continue to show a valid selected mode such as OFF, MANUAL or
+AUTO while the fault itself is reported separately.
+
+\subsection{Priority order}
+
+Every control tick uses the same descending priority:
+
+\begin{lstlisting}
+FAULT -> OFF -> MANUAL -> AUTO
+\end{lstlisting}
+
+This means that a fault always switches the load off, even if the current selected
+mode is MANUAL or AUTO. OFF also has priority over manual and automatic
+operation. This simple priority rule is one of the main safety properties of the
+firmware.
+
+\subsection{AUTO mode}
+
+AUTO mode is configured by default as follows:
+
+\begin{itemize}
+  \item switch-on threshold: \code{SURPLUS_ON_THRESHOLD_W = 1200 W},
+  \item switch-off threshold: \code{SURPLUS_OFF_THRESHOLD_W = 800 W},
+  \item switch-on delay: \code{SWITCH_ON_DELAY_MS = 10000 ms},
+  \item switch-off delay: \code{SWITCH_OFF_DELAY_MS = 5000 ms},
+  \item minimum dwell time before AUTO may switch on again:
+  \code{MINIMUM_DWELL_TIME_MS = 30000 ms}.
+\end{itemize}
+
+The off threshold is lower than the on threshold. This hysteresis prevents rapid
+switching around one single threshold. The delay timers require a continuous
+condition: a short surplus spike is not enough to energize the contactor. The dwell
+time reduces repeated cycling and mechanical stress. OFF transitions and faults
+are not delayed, because safety must react immediately.
+
+\subsection{Manual mode}
+
+In MANUAL mode, the load follows a manual latch. Locally, the latch is toggled by
+a long button press while the selected mode is MANUAL and no fault is active. Home
+Assistant can also set the manual latch through its MQTT switch. MANUAL mode is
+not dwell-gated; a deliberate local command should take effect immediately. A
+fault or OFF mode still overrides the manual latch.
+
+\subsection{Fault model}
+
+Faults are represented as a bitmask so that several faults can be reported at the
+same time.
+
+\begin{longtable}{p{0.13\textwidth}p{0.25\textwidth}p{0.42\textwidth}p{0.12\textwidth}}
+\toprule
+Bit & Fault & Trigger & Clear behavior\\
+\midrule
+\endhead
+\code{0x01} & PV invalid & PV input is not numeric, outside the plausible MQTT
+range or outside the local ADC rail window. & Auto-clear on recovery.\\
+\code{0x02} & NTC open & Divider node voltage is near 0 V, indicating a broken
+or unplugged NTC path. & Healthy hold plus acknowledgement.\\
+\code{0x04} & NTC short & Divider node voltage is near the supply rail,
+indicating a short. & Healthy hold plus acknowledgement.\\
+\code{0x08} & NTC range & Converted temperature is outside the configured
+sensor range. & Healthy hold plus acknowledgement.\\
+\code{0x10} & Overtemperature & NTC reads above \code{TEMPERATURE_LIMIT_C}. The
+current firmware constant is 80 \textdegree C. & Auto-clear after cooling below
+the clear threshold.\\
+\code{0x20} & Mode selector & Reserved for an older selector-switch design. Not
+raised in the current one-button UI. & Not used.\\
+\code{0x40} & Sensor stale & PV or temperature sample path has stopped updating
+within the configured freshness window. & Auto-clear on recovery.\\
+\code{0x80} & Internal & A self-consistency condition is violated. & Manual
+long-press override.\\
+\bottomrule
+\end{longtable}
+
+The overtemperature limit is configurable in \code{config.h}. The current firmware
+uses 80 \textdegree C with a 20 \textdegree C clear margin, so the overtemperature
+fault can release after cooling below approximately 60 \textdegree C. This value
+should be tuned after real thermal measurements of the driver stage and load
+enclosure. The important point for the prototype is that overtemperature is
+detected in the local control loop and immediately forces the load off.
+
+\newpage
+\section{Sensor Handling}
+
+\subsection{PV surplus input}
+
+The firmware supports two surplus input paths.
+
+\textbf{MQTT path, default build:} Home Assistant publishes a signed feed-in power
+value in watts. Positive values mean export or surplus. Negative values mean grid
+import and are clamped to 0 W for the switching decision. Non-numeric values such
+as \code{unknown} or \code{unavailable} are treated as invalid and force the load
+off.
+
+\textbf{Local ADC path:} GPIO34 maps a 0--3.3 V signal linearly to
+0--3680 W. This is useful for a local test potentiometer or a future local sensor
+front end. In a WiFi build, this path can be enabled as a fallback, but the default
+is off because GPIO34 must not be left floating.
+
+Both paths include freshness supervision. The MQTT surplus has a 90 s freshness
+window because network sensors may update slowly. The local ADC path uses a much
+shorter 500 ms freshness window.
+
+\subsection{NTC temperature measurement}
+
+The temperature sensor is a passive 10 kOhm NTC connected as a voltage divider:
+
+\begin{lstlisting}
+3V3 -- NTC -- GPIO35 -- 10 kOhm -- GND
+\end{lstlisting}
+
+With this topology, the node voltage rises as temperature rises. The firmware
+uses:
+
+\begin{lstlisting}
+V_node = Vsupply * Rfixed / (Rntc + Rfixed)
+Rntc   = Rfixed * (Vsupply / V_node - 1)
+1/T    = 1/T0 + (1/Beta) * ln(Rntc / R0)
+\end{lstlisting}
+
+The Beta equation is sufficient for this prototype because the goal is not a
+laboratory-grade thermometer, but a plausible thermal safety input. Open-circuit
+and short-circuit checks are performed before the logarithmic conversion to avoid
+invalid math and, more importantly, to ensure that a broken temperature sensor
+cannot silently appear as a safe value.
+
+\newpage
+\section{Local User Interface}
+
+\subsection{Button behavior}
+
+The physical button on GPIO25 is active-low and uses the ESP32 internal pull-up.
+It is debounced in software without blocking delays.
+
+\begin{tabularx}{\textwidth}{p{0.30\textwidth}X}
+\toprule
+Action & Effect\\
+\midrule
+Short press & Cycle the selected mode: OFF, AUTO, MANUAL, OFF.\\
+Long press in MANUAL & Toggle the manual load latch.\\
+Long press while faulted & Acknowledge or override a fault clear where allowed.\\
+\bottomrule
+\end{tabularx}
+
+Using a single multifunction button keeps the required tactile UI simple while
+still covering all required actions. The trade-off is that the operator must learn
+short press versus long press. This is acceptable for the prototype and avoids
+using a larger physical control panel.
+
+\subsection{LED behavior}
+
+\begin{tabularx}{\textwidth}{p{0.22\textwidth}p{0.22\textwidth}X}
+\toprule
+LED & Pin & Meaning\\
+\midrule
+Load & GPIO16 & On when the commanded load state is ON.\\
+WiFi & GPIO17 & Off = no WiFi, blinking = WiFi without MQTT, solid = MQTT
+connected.\\
+Fault & GPIO18 & Blinks while any fault is latched.\\
+Mode & GPIO27 & Off = OFF, blinking = AUTO, solid = MANUAL.\\
+\bottomrule
+\end{tabularx}
+
+\newpage
+\section{Home Assistant and MQTT Integration}
+
+\subsection{Configuration}
+
+When \code{ENABLE_WIFI=1}, the firmware includes WiFi and MQTT support. Network
+credentials and broker settings are not committed to the repository. The user
+copies \code{firmware/src/secrets.example.h} to \code{firmware/src/secrets.h} and
+fills in the SSID, password, broker host and MQTT topic.
+
+The ESP32 subscribes to \code{MQTT_SURPLUS_TOPIC}, which defaults to
+\code{pvctrl/surplus_w}. The expected payload is a signed number in watts.
+
+\subsection{Home Assistant entities}
+
+The firmware publishes Home Assistant MQTT Discovery configuration. A device named
+\textit{PV Surplus Controller} appears with these entities:
+
+\begin{longtable}{p{0.28\textwidth}p{0.18\textwidth}p{0.44\textwidth}}
+\toprule
+Entity & Direction & Purpose\\
+\midrule
+\endhead
+Mode select & HA to ESP32 & Sets OFF, MANUAL or AUTO.\\
+Manual Load switch & HA to ESP32 & Requests the manual latch state. Effective
+only in MANUAL and only if no higher-priority fault exists.\\
+Threshold ON number & HA to ESP32 & Sets the AUTO switch-on threshold.\\
+Threshold OFF number & HA to ESP32 & Sets the AUTO switch-off threshold. Invalid
+settings where OFF is not lower than ON are ignored.\\
+Fault Reset button & HA to ESP32 & Requests fault acknowledgement.\\
+Load binary sensor & ESP32 to HA & Reports the commanded load state.\\
+Problem binary sensor & ESP32 to HA & Reports whether any fault is active.\\
+Temperature sensor & ESP32 to HA & Reports the NTC temperature.\\
+Surplus used sensor & ESP32 to HA & Reports the surplus value used by the
+controller.\\
+Fault Code sensor & ESP32 to HA & Reports the fault bitmask.\\
+Uptime sensor & ESP32 to HA & Reports seconds since boot.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Reason for consume-once remote commands}
+
+Mode and manual commands from Home Assistant are consumed once in
+\code{main.cpp}. This prevents Home Assistant from overwriting a local button
+press on every control tick. In a tick where both a remote and a local event
+arrive, the firmware applies the remote command first and the local button second,
+so the local action wins the tie. This supports the course requirement that the
+device must remain genuinely operable at the physical device.
+
+\newpage
+\section{Safety Concept}
+
+\subsection{Firmware safety measures}
+
+\begin{itemize}
+  \item \code{hal::initFailSafe()} is the first statement in \code{setup()} and
+  drives GPIO26 LOW before any other initialization.
+  \item GPIO26 is written only through \code{hal::setLoad()}.
+  \item The controller is default-deny: the load is OFF unless MANUAL or AUTO
+  explicitly request ON and no fault is active.
+  \item The state machine checks faults before modes.
+  \item Sensor freshness is supervised so that a frozen value cannot silently keep
+  the load energized.
+  \item The ESP32 task watchdog is armed. If the main loop stalls, the ESP32
+  resets and the boot fail-safe drives the output LOW again.
+  \item Remote commands never write GPIO directly.
+\end{itemize}
+
+\subsection{Hardware safety requirements}
+
+The project is a proof of concept, not a certified mains-voltage product. The
+following hardware points must be treated as mandatory for any real load test:
+
+\begin{itemize}
+  \item The ESP32 must never be connected to mains voltage.
+  \item GPIO26 must drive only a low-voltage driver stage.
+  \item The driver input needs an external pulldown resistor, for example
+  10 kOhm, so the SSR input remains off during reset, brownout and boot.
+  \item The SSR should switch only the 230 V contactor coil, not the final load.
+  \item SSR off-state leakage must be checked to ensure the contactor drops out
+  reliably.
+  \item Work on 230 V or 400 V circuits requires qualified electrical work,
+  correct fusing, enclosure, strain relief, clearances and thermal checks.
+\end{itemize}
+
+\subsection{Reason for using a contactor}
+
+The contactor is used because high-power loads and especially three-phase loads
+should not be switched by a microcontroller-side relay module. A contactor is
+designed for load switching, has suitable contact ratings and provides a clearer
+separation between the logic control side and the power circuit. The SSR is only
+an intermediate element for the coil circuit.
+
+\newpage
+\section{Build and Operation}
+
+\subsection{Build commands}
+
+From the \code{firmware/} directory:
+
+\begin{lstlisting}
+pio run
+pio run -t upload
+pio device monitor
+\end{lstlisting}
+
+The default build enables WiFi and MQTT. It requires a local
+\code{firmware/src/secrets.h}. For an offline build without network libraries:
+
+\begin{lstlisting}
+pio run -e esp32dev --build-flag "-D ENABLE_WIFI=0"
+\end{lstlisting}
+
+\subsection{Expected boot behavior}
+
+On boot, GPIO26 is immediately forced LOW. After initialization, the firmware
+starts the super-loop, updates sensors, evaluates the state machine every 100 ms
+and periodically prints serial telemetry if serial debug output is enabled.
+
+\newpage
+\section{Verification Plan}
+
+\subsection{Software-level checks}
+
+Before connecting mains hardware, the following checks should be performed:
+
+\begin{itemize}
+  \item Compile the default or offline build with PlatformIO.
+  \item Confirm by code search that GPIO26 is driven HIGH only inside
+  \code{hal::setLoad()}.
+  \item Confirm that \code{hal::initFailSafe()} is called before all other setup
+  actions.
+  \item Use the serial monitor to verify mode changes, fault codes, surplus value,
+  temperature value and load decisions.
+  \item Verify that no steady-state \code{delay()} calls exist in the control loop.
+\end{itemize}
+
+\subsection{Hardware verification sequence}
+
+The test sequence follows the structure from the target specification.
+The standalone local three-phase measurement from the original concept is not
+part of this verification plan. It was a technically possible expansion idea, but
+it was not implemented or tested because the real project installation did not
+provide enough suitable space near the PV generation side and the resulting
+measurement cable lengths would have made the solution impractical.
+
+\begin{longtable}{p{0.14\textwidth}p{0.30\textwidth}p{0.46\textwidth}}
+\toprule
+Test & Purpose & Expected result\\
+\midrule
+\endhead
+1.1 & GPIO26 control signal & GPIO26 produces a stable LOW/OFF and HIGH/ON logic
+level during dry tests.\\
+1.2 & Driver stage and SSR input & The low-voltage driver actuates the SSR input
+reliably; the ESP32 remains on the low-voltage side.\\
+1.3 & Single-phase AC load & A small test load follows the contactor command
+without abnormal heating. Qualified mains setup required.\\
+1.4 & Galvanic separation & No unsafe coupling is measured between ESP32 ground
+and AC conductors. Qualified test required.\\
+2.1 & Contactor coil actuation & The SSR output switches the CT1-25 coil and the
+contactor pulls in and drops out reliably.\\
+2.2 & Three-phase resistive load & All phases are switched by the contactor, not
+by the ESP32 or SSR input side. Qualified test required.\\
+2.3 & Repeated cycles & No contact welding, unintended retriggering or abnormal
+temperature rise occurs.\\
+2.4 & ESP32 power loss & Removing ESP32 power makes the contactor drop out and
+the load de-energize.\\
+3.1 & Surplus acquisition & MQTT or local ADC surplus is shown in serial output
+and Home Assistant.\\
+3.2 & AUTO switch-on threshold & In AUTO, load turns on only after surplus exceeds
+the ON threshold continuously for the ON delay and dwell condition.\\
+3.3 & Hysteresis switch-off & Load remains on until surplus falls below the lower
+OFF threshold for the OFF delay.\\
+3.4 & Manual override & In MANUAL, the local long press controls the manual latch
+and takes priority over AUTO.\\
+3.5 & Sensor failure & Invalid PV input, missing MQTT value or NTC fault forces
+load OFF and reports a fault.\\
+3.6 & Network independence & With local surplus input enabled, control continues
+without WiFi. In the default MQTT build, WiFi or MQTT loss is intentionally a safe
+OFF condition because the surplus signal is missing.\\
+10.5 & Temperature monitoring & Heating or disconnecting the NTC triggers the
+appropriate fault and switches the load OFF.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Suggested presentation demonstration}
+
+For the exam presentation without slides, a compact demonstration can show:
+
+\begin{enumerate}
+  \item boot with GPIO26/load LED off,
+  \item short button presses cycling OFF, AUTO and MANUAL,
+  \item long press in MANUAL toggling the load output,
+  \item simulated MQTT surplus causing AUTO switching after the delay,
+  \item NTC open or short fault forcing the load off,
+  \item Home Assistant showing mode, load state, surplus, temperature and fault
+  code.
+\end{enumerate}
+
+This directly proves the parts that are central for the target specification:
+local tactile control, local decision logic, safe output behavior and optional
+network integration.
+
+\newpage
+\section{Known Limitations}
+
+\begin{itemize}
+  \item The current firmware is not a certified safety controller.
+  \item Real mains-voltage and three-phase tests are hardware-dependent and must
+  be performed by qualified persons.
+  \item The OLED display is only a stub in firmware v1.
+  \item The default WiFi build depends on an MQTT surplus value for load
+  energization. Without a valid value, the firmware correctly chooses a fault and
+  safe OFF state.
+  \item Integrated three-phase measurement was considered in the concept, but it
+  is not implemented or tested in this prototype because the required measurement
+  placement and cable lengths were not practical for the real installation.
+  \item There is no contactor auxiliary feedback input, so the firmware knows the
+  commanded load state but not whether the contactor physically closed.
+  \item ADC-based values should be calibrated per device before being used as
+  precise measurements.
+  \item Thresholds and mode commands are retained through Home Assistant/MQTT
+  behavior, but there is no independent NVS configuration storage in the ESP32
+  firmware.
+\end{itemize}
+
+\newpage
+\section{Future Work}
+
+The original concept described a possible final expansion stage in which the
+controller becomes fully standalone through local three-phase measurement. This is
+technically possible, but it was deliberately not pursued or tested in this
+project because it did not fit the real installation concept. The available space
+near the PV generation side was not sufficient for the additional measurement
+hardware, and placing the controller in another location would have required long
+measurement cable runs. For this prototype, using an external surplus value over
+MQTT was therefore the more practical and goal-oriented solution.
+
+If the mechanical and electrical installation conditions are changed in a future
+version, such an expansion would require additional measurement hardware for all
+three phases:
+
+\begin{itemize}
+  \item voltage measurement per phase,
+  \item current measurement with current transformers,
+  \item calculation of active, apparent and reactive power,
+  \item detection of import/export direction,
+  \item calculation of total surplus across all phases,
+  \item optional battery or UPS supply for the low-voltage electronics.
+\end{itemize}
+
+On the firmware side, this can be integrated behind the existing surplus interface:
+the control state machine already consumes a single surplus value in watts. That
+means the measurement source can later change from MQTT or GPIO34 ADC to an
+internal three-phase measurement module without redesigning the complete control
+logic. This statement describes technical feasibility only; the measurement path
+was not built or verified in the current project.
+
+Other useful next steps are:
+
+\begin{itemize}
+  \item implement the OLED renderer,
+  \item add a contactor feedback input,
+  \item store a fault journal in non-volatile memory,
+  \item add per-device ADC and NTC calibration,
+  \item document measured thermal behavior of the SSR, driver stage and
+  contactor enclosure.
+\end{itemize}
+
+\newpage
+\section{Conclusion}
+
+The implemented prototype satisfies the main goal of the course project: it shows
+that an ESP32 can make a local switching decision for PV surplus load control,
+while still offering Home Assistant integration for monitoring and configuration.
+The firmware implements the required modes, tactile local operation, LED feedback,
+fault handling, temperature monitoring, hysteresis and a fail-safe GPIO output.
+
+The most important remaining work is the hardware verification of the mains
+switching path. The final standalone three-phase measurement from the original
+concept remains technically possible, but it was not a practical or
+goal-oriented part of this project because of the available installation space and
+the required cable lengths. The basic prototype is therefore best described as a
+local-first ESP32 controller with an external surplus source and a carefully
+separated low-voltage switching output.
+
+\end{document}
